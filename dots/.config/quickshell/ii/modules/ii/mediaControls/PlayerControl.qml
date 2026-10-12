@@ -59,7 +59,7 @@ Item { // Player instance
 
     Timer { // Force update for revision
         running: root.visible && root.player?.playbackState == MprisPlaybackState.Playing
-        interval: Config.options.resources.updateInterval
+        interval: 250
         repeat: true
         onTriggered: {
             root.player.positionChanged();
