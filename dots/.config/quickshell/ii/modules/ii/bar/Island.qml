@@ -10,7 +10,7 @@ import qs
 import qs.services
 import qs.modules.common
 import qs.modules.common.widgets
-import qs.modules.ii.mediaControls
+import "BarMediaUtils.js" as MediaUtils
 
 Item {
     id: root
@@ -21,26 +21,21 @@ Item {
     property bool initialized: false
     readonly property var barWindow: root.QsWindow.window
     readonly property bool exposed: visible && (barWindow?.visible ?? false)
-    readonly property MprisPlayer activePlayer: {
-        const preferred = Config.options.bar.media.preferredPlayer.trim().toLowerCase();
-        return (preferred ? MprisController.players.find(p => (p.identity ?? "").toLowerCase().includes(preferred)
-            || (p.desktopEntry ?? "").toLowerCase().includes(preferred)) : null) ?? MprisController.activePlayer;
-    }
+    readonly property MprisPlayer activePlayer: MediaUtils.selectPlayer(
+        MprisController.players, MprisController.activePlayer, Config.options.bar.media.preferredPlayer)
     readonly property color mediaAccent: playerLoader.item?.hasArtColors
         ? playerLoader.item.blendedColors.colPrimary : Appearance.colors.colPrimary
     readonly property var mediaColors: playerLoader.item?.blendedColors ?? Appearance.colors
-    readonly property bool isPlaying: activePlayer?.isPlaying ?? false
     readonly property bool hasActivity: activePlayer !== null && activePlayer.playbackState !== MprisPlaybackState.Stopped
-    readonly property bool mediaActivity: hasActivity
     readonly property bool specialActive: workspaces.workspaceModel.specialWorkspace != null
         && workspaces.workspaceModel.specialWorkspaceActive
     readonly property string specialName: workspaces.workspaceModel.specialWorkspaceName
-    readonly property bool showActivity: mediaActivity || specialActive
+    readonly property bool showActivity: hasActivity || specialActive
     state: expanded && activePlayer !== null ? "expanded" : (showActivity ? "notif" : "idle")
 
     readonly property real compactHeight: Math.max(24, Appearance.sizes.barHeight - 8)
-    readonly property real compactWidth: workspaces.implicitWidth + (mediaActivity ? 76 : 32)
-    readonly property real compactLength: workspaces.implicitHeight + (mediaActivity ? 88 : 32)
+    readonly property real compactWidth: workspaces.implicitWidth + (hasActivity ? 76 : 32)
+    readonly property real compactLength: workspaces.implicitHeight + (hasActivity ? 88 : 32)
     readonly property real verticalWidth: Appearance.sizes.baseVerticalBarWidth
         - (Config.options.bar.cornerStyle === 3 ? 6 : 0)
     Layout.fillHeight: !vertical
@@ -50,7 +45,7 @@ Item {
     Behavior on implicitWidth { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
     Behavior on implicitHeight { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
 
-    readonly property bool showTrackDetails: mediaActivity && !workspacePreviewTimer.running
+    readonly property bool showTrackDetails: hasActivity && !workspacePreviewTimer.running
         && (barHover.hovered || trackPreviewTimer.running || dragging)
     readonly property bool showSpecial: specialActive && !showTrackDetails && !workspacePreviewTimer.running
     readonly property bool revealWorkspaces: !dragging && !showTrackDetails && !showSpecial
@@ -73,7 +68,7 @@ Item {
         interval: 2000
     }
     function showTrackPreview() {
-        if (initialized && exposed && mediaActivity) trackPreviewTimer.restart();
+        if (initialized && exposed && hasActivity) trackPreviewTimer.restart();
     }
     Connections {
         target: workspaces.workspaceModel
@@ -143,44 +138,14 @@ Item {
         }
     }
     // Let short clicks finish; take over the pointer only after a drag begins.
-    DragHandler {
+    BarMediaPullHandler {
         id: pullGesture
-        target: null
-        enabled: root.activePlayer !== null && !root.expanded && (root.expansion === 0 || root.dragging)
-        acceptedButtons: Qt.LeftButton
-        grabPermissions: PointerHandler.CanTakeOverFromAnything
-        xAxis.enabled: root.vertical
-        yAxis.enabled: !root.vertical
-        onActiveChanged: {
-            if (active) root.beginPull();
-            else if (root.dragging) root.cancelPull();
-        }
-        onTranslationChanged: {
-            const distance = root.vertical ? activeTranslation.x : activeTranslation.y;
-            if (active) root.updatePull(distance * (Config.options.bar.bottom ? -1 : 1));
-        }
-        onCanceled: if (root.dragging) root.cancelPull()
+        host: root
     }
     property bool dragging: false
     property real pullDistance: 0
     readonly property real pullThreshold: 70
-    function beginPull() {
-        if (!activePlayer) return;
-        captureBounds();
-        dragging = true;
-        pullDistance = 0;
-        expansion = 0;
-    }
-    function updatePull(distance) {
-        if (!dragging) return;
-        pullDistance = Math.max(0, distance);
-        if (pullDistance >= pullThreshold) {
-            // Commit immediately; release is no longer needed to complete the gesture.
-            dragging = false;
-            expanded = true;
-        } else expansion = pullDistance / pullThreshold * 0.12;
-    }
-    function cancelPull() { dragging = false; pullDistance = 0; expansion = 0; }
+    function cancelPull() { pullGesture.cancelPull(); }
 
     // Freeze both endpoints before opening; bar layout and metadata cannot retarget a running morph.
     property rect compactBounds: Qt.rect(0, 0, 240, 32)
@@ -199,19 +164,10 @@ Item {
     function captureBounds() {
         if (!barWindow) return;
         const pos = root.mapToItem(barWindow.contentItem, surface.x, surface.y);
-        const x = pos.x;
-        const y = pos.y;
-        compactBounds = Qt.rect(x, y, surface.width, surface.height);
-        const cx = x + compactBounds.width / 2;
-        const cy = y + compactBounds.height / 2;
-        const targetX = vertical
-            ? (Config.options.bar.bottom ? cx - Appearance.sizes.verticalBarWidth / 2 - 8 - playerWidth
-                : cx + Appearance.sizes.verticalBarWidth / 2 + 8) : cx - playerWidth / 2;
-        const targetY = vertical ? cy - playerHeight / 2
-            : (Config.options.bar.bottom ? cy - Appearance.sizes.barHeight / 2 - 8 - playerHeight
-                : cy + Appearance.sizes.barHeight / 2 + 8);
-        expandedBounds = Qt.rect(Math.max(8, Math.min(barWindow.width - playerWidth - 8, targetX)),
-            Math.max(8, Math.min(barWindow.height - playerHeight - 8, targetY)), playerWidth, playerHeight);
+        compactBounds = Qt.rect(pos.x, pos.y, surface.width, surface.height);
+        expandedBounds = MediaUtils.expandedBounds(compactBounds, playerWidth, playerHeight,
+            barWindow.width, barWindow.height, vertical, Config.options.bar.bottom,
+            Appearance.sizes.verticalBarWidth, Appearance.sizes.barHeight);
     }
     onExpandedChanged: {
         if (expanded) {
@@ -250,8 +206,12 @@ Item {
         anchors.fill: parent
         visible: root.exposed
     }
-    ClippingRectangle {
+    BarMediaSurface {
         id: surface
+        textureSize: root.expansion > 0
+            ? Qt.size(Math.ceil(Math.max(root.compactBounds.width, root.expandedBounds.width)),
+                Math.ceil(Math.max(root.compactBounds.height, root.expandedBounds.height)))
+            : Qt.size(Math.ceil(width), Math.ceil(height))
         parent: root.expansion > 0 ? overlay : root
         x: root.expansion > 0 ? root.interpolate(root.compactBounds.x, root.expandedBounds.x) : (root.width - width) / 2
         y: root.expansion > 0 ? root.interpolate(root.compactBounds.y, root.expandedBounds.y) : (root.height - height) / 2
@@ -270,7 +230,15 @@ Item {
         z: 1
         focus: root.expanded
         Keys.onEscapePressed: event => { root.expanded = false; event.accepted = true; }
-        StyledRectangularShadow { parent: surface; target: surface; opacity: root.expansion; z: -1 }
+        StyledRectangularShadow {
+            parent: surface
+            target: surface
+            opacity: root.expansion
+            visible: opacity > 0
+            // Geometry changes every frame; caching would recreate the shadow texture.
+            cached: false
+            z: -1
+        }
         IslandContent {
             id: compactContent
             anchors.centerIn: parent
@@ -279,7 +247,7 @@ Item {
             opacity: Math.max(0, 1 - root.expansion * 3)
             workspaceVisible: root.revealWorkspaces && !root.collapsing
             player: root.activePlayer
-            mediaVisible: root.mediaActivity
+            mediaVisible: root.hasActivity
             trackVisible: root.showTrackDetails
             specialVisible: root.showSpecial
             specialName: root.specialName
@@ -290,54 +258,23 @@ Item {
             layer.enabled: true
             layer.smooth: true
         }
-        RippleButton {
+        BarMediaPlayButton {
             parent: root
             z: 4
             x: Math.round(surface.x + surface.width - 40 - width)
             y: Math.round(surface.y + (surface.height - height) / 2)
-            implicitWidth: 40
-            implicitHeight: 23
+            player: root.activePlayer
+            colors: root.mediaColors
             visible: opacity > 0 && root.expansion === 0 && !root.vertical
-            opacity: root.mediaActivity && barHover.hovered && !root.revealWorkspaces ? 1 : 0
+            opacity: root.hasActivity && barHover.hovered && !root.revealWorkspaces ? 1 : 0
             enabled: opacity > 0.95
             Behavior on opacity { NumberAnimation { duration: 150 } }
-            buttonRadius: root.isPlaying ? Appearance.rounding.normal : 13
-            colBackground: root.isPlaying ? root.mediaColors.colPrimary : root.mediaColors.colSecondaryContainer
-            colBackgroundHover: root.isPlaying ? root.mediaColors.colPrimaryHover : root.mediaColors.colSecondaryContainerHover
-            colRipple: root.isPlaying ? root.mediaColors.colPrimaryActive : root.mediaColors.colSecondaryContainerActive
-            downAction: () => root.activePlayer?.togglePlaying()
-            contentItem: MaterialSymbol {
-                anchors.centerIn: parent
-                horizontalAlignment: Text.AlignHCenter
-                text: root.isPlaying ? "pause" : "play_arrow"
-                iconSize: Appearance.font.pixelSize.large
-                fill: 1
-                color: root.isPlaying ? root.mediaColors.colOnPrimary : root.mediaColors.colOnSecondaryContainer
-            }
         }
 
         // Prewarm fixed-size controls; only the pill contributes to the window's input mask.
-        Loader {
+        BarMediaPlayerLoader {
             id: playerLoader
-            anchors.centerIn: parent
-            width: root.playerWidth
-            height: root.playerHeight
-            active: root.exposed && root.activePlayer !== null
-            asynchronous: true
-            onStatusChanged: if (status === Loader.Ready && root.expanded) root.expansion = 1
-            visible: root.expansion > 0
-            opacity: Math.max(0, (root.expansion - 0.25) / 0.75)
-            enabled: root.expanded && root.expansion > 0.95
-            z: 1
-            layer.enabled: true
-            layer.smooth: true
-            sourceComponent: PlayerControl {
-                player: root.activePlayer
-                visualizerPoints: GlobalStates.visualizerPoints
-                animateTrackChanges: false
-                backgroundMargin: 0
-                radius: 24
-            }
+            host: root
         }
     }
 }

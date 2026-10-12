@@ -11,13 +11,20 @@ Item {
     property bool scrolling: true
     property bool scrollOnlyOnOverflow: false
     property bool centered: true
+    property bool showEdgeGradients: true
     readonly property bool overflowing: measure.implicitWidth > width
     readonly property bool looping: scrolling && (!scrollOnlyOnOverflow || overflowing)
     property real scrollProgress: 0
     readonly property real scrollDistance: measure.implicitWidth + 24
+    onScrollDistanceChanged: Qt.callLater(root.restartScrolling)
     implicitWidth: measure.implicitWidth
     implicitHeight: measure.implicitHeight
     clip: true
+
+    function restartScrolling() {
+        // Restart after the duration binding has picked up the new distance.
+        if (scrollAnimation.running) scrollAnimation.restart();
+    }
 
     Text { id: measure; text: root.text; visible: false; renderType: Text.QtRendering; font.hintingPreference: Font.PreferNoHinting }
     Row {
@@ -42,7 +49,7 @@ Item {
         }
     }
     Repeater {
-        model: 2
+        model: root.showEdgeGradients && root.looping ? 2 : 0
         Rectangle {
             required property int index
             visible: root.looping
@@ -57,6 +64,7 @@ Item {
         }
     }
     NumberAnimation on scrollProgress {
+        id: scrollAnimation
         from: 0
         to: 1
         duration: Math.max(1, root.scrollDistance / 24 * 1000)

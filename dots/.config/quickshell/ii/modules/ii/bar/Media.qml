@@ -5,41 +5,29 @@ import qs.modules.common.functions
 import qs.services
 import qs.modules.common.models
 import qs
-import Qt5Compat.GraphicalEffects
 import QtQuick
-import QtQuick.Effects
 import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import Quickshell.Services.Mpris
 import Quickshell.Widgets
-import qs.modules.ii.mediaControls
+import "BarMediaUtils.js" as MediaUtils
 
 Item {
     id: root
 
     property bool vertical: false
-    property bool borderless: Config.options.bar.borderless
-    property bool isMaterial: Config.options.bar.cornerStyle === 3
-    readonly property MprisPlayer activePlayer: {
-        const preferred = Config.options.bar.media.preferredPlayer.trim().toLowerCase();
-        if (preferred.length === 0)
-            return MprisController.activePlayer;
-        const _ = MprisController.players.count;
-        for (const p of MprisController.players) {
-            if ((p.identity ?? "").toLowerCase().includes(preferred) || (p.desktopEntry ?? "").toLowerCase().includes(preferred))
-                return p;
-        }
-        return MprisController.activePlayer;
-    }
+    readonly property bool isMaterial: Config.options.bar.cornerStyle === 3
+    readonly property MprisPlayer activePlayer: MediaUtils.selectPlayer(
+        MprisController.players, MprisController.activePlayer, Config.options.bar.media.preferredPlayer)
 
     readonly property string cleanedTitle: StringUtils.cleanMusicTitle(activePlayer?.trackTitle) || Translation.tr("No media")
 
-    property var artUrl: activePlayer?.trackArtUrl ?? ""
-    property string trackTitle: activePlayer?.trackTitle ?? ""
-    property string trackArtist: activePlayer?.trackArtist ?? ""
-    property bool isPlaying: activePlayer?.isPlaying ?? false
-    property bool hasTrack: trackTitle.length > 0
+    readonly property string artUrl: activePlayer?.trackArtUrl ?? ""
+    readonly property string trackTitle: activePlayer?.trackTitle ?? ""
+    readonly property string trackArtist: activePlayer?.trackArtist ?? ""
+    readonly property bool isPlaying: activePlayer?.isPlaying ?? false
+    readonly property bool hasTrack: trackTitle.length > 0
     readonly property bool hasActivity: activePlayer !== null && activePlayer.playbackState !== MprisPlaybackState.Stopped
     property bool expanded: false
     property bool collapsing: false
@@ -49,6 +37,8 @@ Item {
     readonly property var barWindow: root.QsWindow.window
     property var barGroup: null
     function registerWithGroup() {
+        if (barGroup?.morphingMedia === root) barGroup.morphingMedia = null;
+        barGroup = null;
         let item = root.parent;
         while (item) {
             if (typeof item.morphingMedia !== "undefined") {
@@ -80,33 +70,11 @@ Item {
         const source = groupBackground ?? root;
         const pos = source.mapToItem(barWindow.contentItem, 0, 0);
         compactBounds = Qt.rect(pos.x, pos.y, source.width, source.height);
-        const cx = pos.x + source.width / 2;
-        const cy = pos.y + source.height / 2;
-        const targetX = root.vertical
-            ? (Config.options.bar.bottom ? cx - Appearance.sizes.verticalBarWidth / 2 - 8 - playerWidth
-                : cx + Appearance.sizes.verticalBarWidth / 2 + 8) : cx - playerWidth / 2;
-        const targetY = root.vertical ? cy - playerHeight / 2
-            : (Config.options.bar.bottom ? cy - Appearance.sizes.barHeight / 2 - 8 - playerHeight
-                : cy + Appearance.sizes.barHeight / 2 + 8);
-        expandedBounds = Qt.rect(Math.max(8, Math.min(barWindow.width - playerWidth - 8, targetX)),
-            Math.max(8, Math.min(barWindow.height - playerHeight - 8, targetY)), playerWidth, playerHeight);
+        expandedBounds = MediaUtils.expandedBounds(compactBounds, playerWidth, playerHeight,
+            barWindow.width, barWindow.height, vertical, Config.options.bar.bottom,
+            Appearance.sizes.verticalBarWidth, Appearance.sizes.barHeight);
     }
-    function beginPull() {
-        if (!activePlayer) return;
-        captureBounds();
-        dragging = true;
-        pullDistance = 0;
-        expansion = 0;
-    }
-    function updatePull(distance) {
-        if (!dragging) return;
-        pullDistance = Math.max(0, distance);
-        if (pullDistance >= pullThreshold) {
-            dragging = false;
-            expanded = true;
-        } else expansion = pullDistance / pullThreshold * 0.12;
-    }
-    function cancelPull() { dragging = false; pullDistance = 0; expansion = 0; }
+    function cancelPull() { pullGesture.cancelPull(); }
     onExpandedChanged: {
         if (expanded) {
             collapsing = false;
@@ -153,8 +121,10 @@ Item {
         anchors.fill: parent
         visible: root.exposed
     }
-    ClippingRectangle {
+    BarMediaSurface {
         id: surface
+        textureSize: Qt.size(Math.ceil(Math.max(root.compactBounds.width, root.expandedBounds.width)),
+            Math.ceil(Math.max(root.compactBounds.height, root.expandedBounds.height)))
         parent: overlay
         x: root.interpolate(root.compactBounds.x, root.expandedBounds.x)
         y: root.interpolate(root.compactBounds.y, root.expandedBounds.y)
@@ -168,27 +138,17 @@ Item {
         visible: root.exposed && root.expansion > 0
         focus: root.expanded
         Keys.onEscapePressed: event => { root.expanded = false; event.accepted = true; }
-        StyledRectangularShadow { parent: surface; target: surface; opacity: root.expansion; z: -1 }
-        Loader {
+        StyledRectangularShadow {
+            parent: surface
+            target: surface
+            opacity: root.expansion
+            visible: opacity > 0
+            cached: false
+            z: -1
+        }
+        BarMediaPlayerLoader {
             id: playerLoader
-            anchors.centerIn: parent
-            width: root.playerWidth
-            height: root.playerHeight
-            active: root.exposed && root.activePlayer !== null
-            asynchronous: true
-            onStatusChanged: if (status === Loader.Ready && root.expanded) root.expansion = 1
-            opacity: Math.max(0, (root.expansion - 0.25) / 0.75)
-            enabled: root.expanded && root.expansion > 0.95
-            z: 1
-            layer.enabled: true
-            layer.smooth: true
-            sourceComponent: PlayerControl {
-                player: root.activePlayer
-                visualizerPoints: GlobalStates.visualizerPoints
-                animateTrackChanges: false
-                backgroundMargin: 0
-                radius: 24
-            }
+            host: root
         }
     }
 
@@ -222,18 +182,20 @@ Item {
         color: root.artDominantColor
     }
 
-    onArtFilePathChanged: {
-        if (!root.artUrl || root.artUrl.length === 0) {
-            root.artDownloaded = false;
+    onArtFilePathChanged: refreshArtwork()
+    onIsMaterialChanged: refreshArtwork()
+
+    function refreshArtwork() {
+        artDownloaded = false;
+        if (!isMaterial || !artUrl) return;
+        if (artUrl.startsWith("file://")) {
+            artDownloaded = true;
             return;
         }
-        if (root.artUrl.startsWith("file://")) {
-            root.artDownloaded = true;
-            return;
-        }
-        artDownloader.targetFile = root.artUrl;
-        artDownloader.artFilePath = root.artFilePath;
-        root.artDownloaded = false;
+        // Let the current request finish before starting the latest one.
+        if (artDownloader.running) return;
+        artDownloader.targetFile = artUrl;
+        artDownloader.artFilePath = artFilePath;
         artDownloader.running = true;
     }
 
@@ -241,15 +203,14 @@ Item {
         if (root.width <= 0)
             return;
 
-        let rootItem = root.Window?.contentItem ?? null;
-        let pos = rootItem ? root.mapToItem(rootItem, 0, 0) : Qt.point(0, 0);
+        const rootItem = barWindow?.contentItem ?? null;
+        const pos = rootItem ? root.mapToItem(rootItem, 0, 0) : Qt.point(0, 0);
 
-        if (pos.x > 0 || pos.y > 0) {
-            GlobalStates.mediaWidgetX = pos.x;
-            GlobalStates.mediaWidgetY = pos.y;
-            GlobalStates.mediaWidgetWidth = root.width;
-            GlobalStates.mediaWidgetHeight = root.height;
-        }
+        if (pos.x <= 0 && pos.y <= 0) return;
+        GlobalStates.mediaWidgetX = pos.x;
+        GlobalStates.mediaWidgetY = pos.y;
+        GlobalStates.mediaWidgetWidth = root.width;
+        GlobalStates.mediaWidgetHeight = root.height;
     }
 
     Connections {
@@ -265,9 +226,39 @@ Item {
         id: artDownloader
         property string targetFile: root.artUrl
         property string artFilePath: root.artFilePath
-        command: ["bash", "-c", `[ -f ${artFilePath} ] || curl -sSL '${targetFile}' -o '${artFilePath}'`]
-        onExited: {
-            root.artDownloaded = true;
+        command: ["bash", "-c",
+            '[ -f "$2" ] || { part="$2.$$.part"; trap \'rm -f -- "$part"\' EXIT; '
+                + 'curl -f -sSL -o "$part" -- "$1" && mv -- "$part" "$2"; }',
+            "bar-media-art", targetFile, artFilePath]
+        onExited: exitCode => {
+            if (targetFile !== root.artUrl || artFilePath !== root.artFilePath) {
+                root.refreshArtwork();
+                return;
+            }
+            root.artDownloaded = exitCode === 0;
+        }
+    }
+
+    readonly property real trackProgress: activePlayer && activePlayer.length > 0
+        ? Math.max(0, Math.min(1, activePlayer.position / activePlayer.length)) : 0
+
+    component PlaybackProgress: ClippedFilledCircularProgress {
+        implicitSize: 20
+        lineWidth: Appearance.rounding.unsharpen
+        value: root.trackProgress
+        colPrimary: Appearance.colors.colOnSecondaryContainer
+        enableAnimation: false
+        Item {
+            anchors.centerIn: parent
+            width: 20
+            height: 20
+            MaterialSymbol {
+                anchors.centerIn: parent
+                fill: 1
+                text: root.activePlayer?.isPlaying ? "pause" : "music_note"
+                iconSize: Appearance.font.pixelSize.normal
+                color: Appearance.m3colors.m3onSecondaryContainer
+            }
         }
     }
 
@@ -276,10 +267,10 @@ Item {
     implicitHeight: vertical ? (isMaterial ? 32 : mediaCircProg.implicitHeight + 12) : Appearance.sizes.barHeight
 
     Timer {
-        running: activePlayer?.playbackState == MprisPlaybackState.Playing
+        running: root.exposed && !root.isMaterial && root.expansion === 0 && root.isPlaying
         interval: Config.options.resources.updateInterval
         repeat: true
-        onTriggered: activePlayer.positionChanged()
+        onTriggered: root.activePlayer?.positionChanged()
     }
 
     MouseArea {
@@ -304,23 +295,9 @@ Item {
             event.accepted = true;
         }
     }
-    DragHandler {
+    BarMediaPullHandler {
         id: pullGesture
-        target: null
-        enabled: root.activePlayer !== null && !root.expanded && (root.expansion === 0 || root.dragging)
-        acceptedButtons: Qt.LeftButton
-        grabPermissions: PointerHandler.CanTakeOverFromAnything
-        xAxis.enabled: root.vertical
-        yAxis.enabled: !root.vertical
-        onActiveChanged: {
-            if (active) root.beginPull();
-            else if (root.dragging) root.cancelPull();
-        }
-        onTranslationChanged: {
-            const distance = root.vertical ? activeTranslation.x : activeTranslation.y;
-            if (active) root.updatePull(distance * (Config.options.bar.bottom ? -1 : 1));
-        }
-        onCanceled: if (root.dragging) root.cancelPull()
+        host: root
     }
 
     Item {
@@ -334,323 +311,254 @@ Item {
         layer.enabled: root.expansion > 0
         layer.smooth: true
 
-    // Vertical default
-    Loader {
-        id: mediaCircProg
-        active: root.vertical && !root.isMaterial
-        visible: active
-        anchors.centerIn: parent
-        sourceComponent: ClippedFilledCircularProgress {
-            implicitSize: 20
-            lineWidth: Appearance.rounding.unsharpen
-            value: root.activePlayer?.position / root.activePlayer?.length
-            colPrimary: Appearance.colors.colOnSecondaryContainer
-            enableAnimation: false
-            Item {
+        // Vertical default
+        Loader {
+            id: mediaCircProg
+            active: root.vertical && !root.isMaterial
+            visible: active
+            anchors.centerIn: parent
+            sourceComponent: PlaybackProgress {}
+        }
+
+        // Vertical Material
+        Rectangle {
+            visible: root.vertical && root.isMaterial
+            anchors.centerIn: parent
+            color: root.blendedColors.colSecondaryContainer
+            radius: Appearance.rounding.full
+            implicitWidth: 32
+            implicitHeight: 32
+
+            MaterialSymbol {
                 anchors.centerIn: parent
-                width: 20
-                height: 20
-                MaterialSymbol {
-                    anchors.centerIn: parent
-                    fill: 1
-                    text: root.activePlayer?.isPlaying ? "pause" : "music_note"
-                    iconSize: Appearance.font.pixelSize.normal
-                    color: Appearance.m3colors.m3onSecondaryContainer
+                fill: 1
+                text: root.activePlayer?.isPlaying ? "pause" : "music_note"
+                iconSize: Appearance.font.pixelSize.normal
+                color: root.blendedColors.colOnSecondaryContainer
+            }
+        }
+
+        // Horizontal default
+        Loader {
+            id: rowLayout
+            active: !root.vertical && !root.isMaterial
+            visible: active
+            anchors.fill: parent
+            sourceComponent: RowLayout {
+                spacing: 4
+                PlaybackProgress {
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.leftMargin: 3
+                }
+                ScrollingText {
+                    visible: Config.options.bar.verbose
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: implicitHeight
+                    Layout.rightMargin: 0
+                    color: Appearance.colors.colOnLayer1
+                    font.family: Appearance.font.family.main
+                    backgroundColor: ColorUtils.applyAlpha(root.groupBackground?.color ?? Appearance.colors.colLayer0, 1)
+                    scrollOnlyOnOverflow: true
+                    text: Config.options.bar.media.onlyTitle ? root.cleanedTitle : `${root.cleanedTitle}${root.activePlayer?.trackArtist ? ' • ' + root.activePlayer.trackArtist : ''}`
                 }
             }
         }
-    }
 
-    // Vertical Material
-    Rectangle {
-        visible: root.vertical && root.isMaterial
-        anchors.centerIn: parent
-        color: root.blendedColors.colSecondaryContainer
-        radius: Appearance.rounding.full
-        implicitWidth: 32
-        implicitHeight: 32
-
-        MaterialSymbol {
+        // Horizontal Material
+        Loader {
+            id: materialRow
+            active: !root.vertical && root.isMaterial
+            visible: active
             anchors.centerIn: parent
-            fill: 1
-            text: root.activePlayer?.isPlaying ? "pause" : "music_note"
-            iconSize: Appearance.font.pixelSize.normal
-            color: root.blendedColors.colOnSecondaryContainer
-        }
-    }
+            sourceComponent: RowLayout {
+                id: innerRow
+                anchors.centerIn: parent
+                spacing: 6
 
-    // Horizontal default
-    Loader {
-        id: rowLayout
-        active: !root.vertical && !root.isMaterial
-        visible: active
-        anchors.fill: parent
-        sourceComponent: RowLayout {
-            spacing: 4
-            ClippedFilledCircularProgress {
-                Layout.alignment: Qt.AlignVCenter
-                Layout.leftMargin: 3
-                implicitSize: 20
-                lineWidth: Appearance.rounding.unsharpen
-                value: root.activePlayer?.position / root.activePlayer?.length
-                colPrimary: Appearance.colors.colOnSecondaryContainer
-                enableAnimation: false
-                Item {
-                    anchors.centerIn: parent
-                    width: 20
-                    height: 20
-                    MaterialSymbol {
-                        anchors.centerIn: parent
-                        fill: 1
-                        text: root.activePlayer?.isPlaying ? "pause" : "music_note"
-                        iconSize: Appearance.font.pixelSize.normal
-                        color: Appearance.m3colors.m3onSecondaryContainer
-                    }
-                }
-            }
-            ScrollingText {
-                visible: Config.options.bar.verbose
-                Layout.alignment: Qt.AlignVCenter
-                Layout.fillWidth: true
-                Layout.preferredHeight: implicitHeight
-                Layout.rightMargin: 0
-                color: Appearance.colors.colOnLayer1
-                font.family: Appearance.font.family.main
-                backgroundColor: ColorUtils.applyAlpha(root.groupBackground?.color ?? Appearance.colors.colLayer0, 1)
-                scrollOnlyOnOverflow: true
-                text: Config.options.bar.media.onlyTitle ? root.cleanedTitle : `${root.cleanedTitle}${root.activePlayer?.trackArtist ? ' • ' + root.activePlayer.trackArtist : ''}`
-            }
-        }
-    }
+                // Profile fallback
+                Loader {
+                    active: !root.hasTrack
+                    visible: active
+                    Layout.alignment: Qt.AlignVCenter
+                    sourceComponent: RowLayout {
+                        spacing: 6
 
-    // Horizontal Material
-    Loader {
-        id: materialRow
-        active: !root.vertical && root.isMaterial
-        visible: active
-        anchors.centerIn: parent
-        sourceComponent: RowLayout {
-            id: innerRow
-            anchors.centerIn: parent
-            spacing: 6
+                        // Avatar
+                        ClippingRectangle {
+                            id: avatarRect
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            radius: Appearance.rounding.full
+                            color: Appearance.colors.colPrimaryContainer
+                            Layout.alignment: Qt.AlignVCenter
 
-            // No platyer
-            Loader {
-                active: !root.hasTrack
-                visible: active
-                Layout.alignment: Qt.AlignVCenter
-                sourceComponent: RowLayout {
-                    spacing: 6
+                            Image {
+                                id: avatarImage
+                                anchors.fill: parent
+                                source: Config.options.profile.avatarPath !== "" ? "file://" + Config.options.profile.avatarPicture : "file:///home/" + (Quickshell.env("USER") ?? "user") + "/.face"
+                                sourceSize.width: avatarRect.width * 2
+                                sourceSize.height: avatarRect.height * 2
+                                fillMode: Image.PreserveAspectCrop
+                                visible: status === Image.Ready
+                            }
 
-                    // Avatar
-                    Rectangle {
-                        id: avatarRect
-                        implicitWidth: 26
-                        implicitHeight: 26
-                        radius: Appearance.rounding.full
-                        color: Appearance.colors.colPrimaryContainer
-                        Layout.alignment: Qt.AlignVCenter
-
-                        layer.enabled: true
-                        layer.effect: OpacityMask {
-                            maskSource: Rectangle {
-                                width: avatarRect.width
-                                height: avatarRect.height
-                                radius: avatarRect.radius
+                            MaterialSymbol {
+                                anchors.centerIn: parent
+                                text: "account_circle"
+                                iconSize: Appearance.font.pixelSize.normal
+                                color: Appearance.colors.colOnPrimaryContainer
+                                visible: avatarImage.status === Image.Error || avatarImage.status === Image.Null
                             }
                         }
 
-                        Image {
-                            id: avatarImage
-                            anchors.fill: parent
-                            source: Config.options.profile.avatarPath !== "" ? "file://" + Config.options.profile.avatarPicture : "file:///home/" + (Quickshell.env("USER") ?? "user") + "/.face"
-                            sourceSize.width: avatarRect.width * 2
-                            sourceSize.height: avatarRect.height * 2
-                            fillMode: Image.PreserveAspectCrop
-                            onStatusChanged: {
-                                if (status === Image.Error)
-                                    visible = false;
+                        ColumnLayout {
+                            spacing: -3
+                            Layout.alignment: Qt.AlignVCenter
+                            Layout.topMargin: -2
+
+                            StyledText {
+                                text: Config.options.profile.displayName === "" ? SystemInfo.username : Config.options.profile.displayName
+                                font.pixelSize: Appearance.font.pixelSize.smaller
+                                color: Appearance.colors.colOnSecondaryContainer
+                                elide: Text.ElideRight
+                                Layout.maximumWidth: 120
                             }
-                        }
 
-                        MaterialSymbol {
-                            anchors.centerIn: parent
-                            text: "account_circle"
-                            iconSize: Appearance.font.pixelSize.normal
-                            color: Appearance.colors.colOnPrimaryContainer
-                            visible: avatarImage.status === Image.Error || avatarImage.status === Image.Null
-                        }
-                    }
-
-                    ColumnLayout {
-                        spacing: -3
-                        Layout.alignment: Qt.AlignVCenter
-                        Layout.topMargin: -2
-
-                        StyledText {
-                            text: Config.options.profile.displayName === "" ? SystemInfo.username : Config.options.profile.displayName
-                            font.pixelSize: Appearance.font.pixelSize.smaller
-                            color: Appearance.colors.colOnSecondaryContainer
-                            elide: Text.ElideRight
-                            Layout.maximumWidth: 120
-                        }
-
-                        StyledText {
-                            id: distroLabel
-                            font.pixelSize: Appearance.font.pixelSize.smaller
-                            color: Appearance.colors.colOnSecondaryContainer
-                            opacity: 0.7
-                            elide: Text.ElideRight
-                            Layout.rightMargin: 8
-                            Layout.maximumWidth: 120
-                            text: SystemInfo.distroName
+                            StyledText {
+                                id: distroLabel
+                                font.pixelSize: Appearance.font.pixelSize.smaller
+                                color: Appearance.colors.colOnSecondaryContainer
+                                opacity: 0.7
+                                elide: Text.ElideRight
+                                Layout.rightMargin: 8
+                                Layout.maximumWidth: 120
+                                text: SystemInfo.distroName
+                            }
                         }
                     }
                 }
-            }
 
-            // Player
-            Loader {
-                active: root.hasTrack
-                visible: active
-                Layout.alignment: Qt.AlignVCenter
-                sourceComponent: RowLayout {
-                    spacing: 6
+                // Player
+                Loader {
+                    active: root.hasTrack
+                    visible: active
+                    Layout.alignment: Qt.AlignVCenter
+                    sourceComponent: RowLayout {
+                        spacing: 6
 
-                    // Art
-                    Rectangle {
-                        id: artRect
-                        implicitWidth: 26
-                        implicitHeight: 26
-                        radius: Appearance.rounding.full
-                        color: root.blendedColors.colSecondaryContainer
-                        Layout.alignment: Qt.AlignVCenter
+                        // Art
+                        ClippingRectangle {
+                            id: artRect
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            radius: Appearance.rounding.full
+                            color: root.blendedColors.colSecondaryContainer
+                            Layout.alignment: Qt.AlignVCenter
 
-                        layer.enabled: true
-                        layer.effect: OpacityMask {
-                            maskSource: Rectangle {
-                                width: artRect.width
-                                height: artRect.height
-                                radius: artRect.radius
+                            StyledImage {
+                                anchors.fill: parent
+                                source: root.displayedArtFilePath
+                                fillMode: Image.PreserveAspectCrop
+                                cache: false
+                                antialiasing: true
+                                sourceSize.width: artRect.width
+                                sourceSize.height: artRect.height
+                                visible: root.displayedArtFilePath !== ""
+                            }
+
+                            MaterialSymbol {
+                                anchors.centerIn: parent
+                                fill: 1
+                                text: "music_note"
+                                iconSize: Appearance.font.pixelSize.normal
+                                color: root.blendedColors.colOnSecondaryContainer
+                                visible: root.displayedArtFilePath === ""
                             }
                         }
 
-                        StyledImage {
-                            anchors.fill: parent
-                            source: root.displayedArtFilePath
-                            fillMode: Image.PreserveAspectCrop
-                            cache: false
-                            antialiasing: true
-                            sourceSize.width: artRect.width
-                            sourceSize.height: artRect.height
-                            visible: root.displayedArtFilePath !== ""
-                        }
+                        // Title + Artist
+                        ColumnLayout {
+                            spacing: -4
+                            Layout.alignment: Qt.AlignVCenter
+                            Layout.topMargin: Config.options.bar.media.onlyTitle ? 0 : 2
 
-                        MaterialSymbol {
-                            anchors.centerIn: parent
-                            fill: 1
-                            text: "music_note"
-                            iconSize: Appearance.font.pixelSize.normal
-                            color: root.blendedColors.colOnSecondaryContainer
-                            visible: root.displayedArtFilePath === ""
-                        }
-                    }
-
-                    // Title + Artist
-                    ColumnLayout {
-                        spacing: -4
-                        Layout.alignment: Qt.AlignVCenter
-                        Layout.topMargin: Config.options.bar.media.onlyTitle ? 0 : 2
-
-                        StyledText {
-                            id: artistText
-                            text: root.trackArtist
-                            visible: !Config.options.bar.media.onlyTitle
-                            font.pixelSize: Appearance.font.pixelSize.smaller
-                            color: root.blendedColors.colSubtext
-                            elide: Text.ElideRight
-                            Layout.maximumWidth: 120
-                            Behavior on text {
-                                SequentialAnimation {
-                                    NumberAnimation {
-                                        target: artistText
-                                        property: "x"
-                                        to: -artistText.width
-                                        duration: 150
-                                        easing.type: Easing.InQuad
-                                    }
-                                    PropertyAction {
-                                        target: artistText
-                                        property: "text"
-                                    }
-                                    NumberAnimation {
-                                        target: artistText
-                                        property: "x"
-                                        from: artistText.width
-                                        to: 0
-                                        duration: 150
-                                        easing.type: Easing.OutQuad
+                            StyledText {
+                                id: artistText
+                                text: root.trackArtist
+                                visible: !Config.options.bar.media.onlyTitle
+                                font.pixelSize: Appearance.font.pixelSize.smaller
+                                color: root.blendedColors.colSubtext
+                                elide: Text.ElideRight
+                                Layout.maximumWidth: 120
+                                Behavior on text {
+                                    SequentialAnimation {
+                                        NumberAnimation {
+                                            target: artistText
+                                            property: "x"
+                                            to: -artistText.width
+                                            duration: 150
+                                            easing.type: Easing.InQuad
+                                        }
+                                        PropertyAction {
+                                            target: artistText
+                                            property: "text"
+                                        }
+                                        NumberAnimation {
+                                            target: artistText
+                                            property: "x"
+                                            from: artistText.width
+                                            to: 0
+                                            duration: 150
+                                            easing.type: Easing.OutQuad
+                                        }
                                     }
                                 }
                             }
+                            ScrollingText {
+                                Layout.topMargin: (!root.activePlayer || root.trackArtist.length === 0) ? -13 : 0
+                                Layout.maximumWidth: 120
+                                Layout.preferredWidth: Math.min(120, implicitWidth)
+                                Layout.preferredHeight: implicitHeight
+                                text: root.cleanedTitle
+                                font.pixelSize: Appearance.font.pixelSize.smallie
+                                font.family: Appearance.font.family.main
+                                color: root.blendedColors.colOnLayer0
+                                backgroundColor: ColorUtils.applyAlpha(root.blendedColors.colLayer0, 1)
+                                centered: false
+                                scrollOnlyOnOverflow: true
+                            }
                         }
-                        ScrollingText {
-                            Layout.topMargin: (!root.activePlayer || root.trackArtist.length === 0) ? -13 : 0
-                            Layout.maximumWidth: 120
-                            Layout.preferredWidth: Math.min(120, implicitWidth)
-                            Layout.preferredHeight: implicitHeight
-                            text: StringUtils.cleanMusicTitle(root.trackTitle) || Translation.tr("No media")
-                            font.pixelSize: Appearance.font.pixelSize.smallie
-                            font.family: Appearance.font.family.main
-                            color: root.blendedColors.colOnLayer0
-                            backgroundColor: ColorUtils.applyAlpha(root.blendedColors.colLayer0, 1)
-                            centered: false
-                            scrollOnlyOnOverflow: true
-                        }
-                    }
 
-                    // Play/Pause
-                    RippleButton {
-                        implicitWidth: 40
-                        implicitHeight: 23
-                        buttonRadius: root.isPlaying ? Appearance.rounding.normal : 13
-                        colBackground: root.isPlaying ? root.blendedColors.colPrimary : root.blendedColors.colSecondaryContainer
-                        colBackgroundHover: root.isPlaying ? root.blendedColors.colPrimaryHover : root.blendedColors.colSecondaryContainerHover
-                        colRipple: root.isPlaying ? root.blendedColors.colPrimaryActive : root.blendedColors.colSecondaryContainerActive
-                        downAction: () => root.activePlayer?.togglePlaying()
-                        contentItem: MaterialSymbol {
-                            anchors.centerIn: parent
-                            horizontalAlignment: Text.AlignHCenter
-                            text: root.isPlaying ? "pause" : "play_arrow"
-                            iconSize: Appearance.font.pixelSize.large
-                            fill: 1
-                            color: root.isPlaying ? root.blendedColors.colOnPrimary : root.blendedColors.colOnSecondaryContainer
+                        // Play/Pause
+                        BarMediaPlayButton {
+                            player: root.activePlayer
+                            colors: root.blendedColors
                         }
-                    }
 
-                    // Next
-                    RippleButton {
-                        implicitWidth: 26
-                        implicitHeight: 26
-                        Layout.leftMargin: -4
-                        buttonRadius: 13
-                        colBackground: "transparent"
-                        colBackgroundHover: root.blendedColors.colSecondaryContainerHover
-                        colRipple: root.blendedColors.colSecondaryContainerActive
-                        downAction: () => root.activePlayer?.next()
-                        altAction: () => root.activePlayer?.previous()
-                        contentItem: MaterialSymbol {
-                            anchors.centerIn: parent
-                            horizontalAlignment: Text.AlignHCenter
-                            text: "skip_next"
-                            iconSize: Appearance.font.pixelSize.large
-                            fill: 1
-                            color: root.blendedColors.colOnSecondaryContainer
+                        // Next
+                        RippleButton {
+                            implicitWidth: 26
+                            implicitHeight: 26
+                            Layout.leftMargin: -4
+                            buttonRadius: 13
+                            colBackground: "transparent"
+                            colBackgroundHover: root.blendedColors.colSecondaryContainerHover
+                            colRipple: root.blendedColors.colSecondaryContainerActive
+                            downAction: () => root.activePlayer?.next()
+                            altAction: () => root.activePlayer?.previous()
+                            contentItem: MaterialSymbol {
+                                anchors.centerIn: parent
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "skip_next"
+                                iconSize: Appearance.font.pixelSize.large
+                                fill: 1
+                                color: root.blendedColors.colOnSecondaryContainer
+                            }
                         }
                     }
                 }
             }
         }
-    }
     }
 }

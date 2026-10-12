@@ -30,6 +30,8 @@ Item { // Player instance
     property real radius
     property bool animateTrackChanges: true
     property real backgroundMargin: Appearance.sizes.elevationMargin
+    property bool clipBackground: true
+    property bool showShadow: true
 
     property string displayedArtFilePath: root.downloaded && root.artUrl.length > 0 ? Qt.resolvedUrl(artFilePath) : ""
 
@@ -98,6 +100,7 @@ Item { // Player instance
 
     StyledRectangularShadow {
         target: background
+        visible: root.showShadow
     }
 
     Rectangle { // Background
@@ -107,7 +110,7 @@ Item { // Player instance
         color: ColorUtils.applyAlpha(blendedColors.colLayer0, 1)
         radius: root.radius
 
-        layer.enabled: true
+        layer.enabled: root.clipBackground
         layer.effect: OpacityMask {
             maskSource: Rectangle {
                 width: background.width
@@ -254,7 +257,7 @@ Item { // Player instance
                     font.pixelSize: Appearance.font.pixelSize.large
                     font.family: Appearance.font.family.main
                     color: blendedColors.colOnLayer0
-                    backgroundColor: ColorUtils.applyAlpha(blendedColors.colLayer0, 1)
+                    showEdgeGradients: false
                     centered: false
                     scrollOnlyOnOverflow: true
                     text: StringUtils.cleanMusicTitle(root.player?.trackTitle) || "Untitled"
