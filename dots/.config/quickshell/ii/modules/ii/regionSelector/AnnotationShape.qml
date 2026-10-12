@@ -1,6 +1,7 @@
 import qs.modules.common
 import QtQuick
 import QtQuick.Shapes
+import "AnnotationGeometry.js" as Geometry
 
 // Renders a single annotation object. The same component is used for committed
 // annotations (inside a Repeater) and for the in-progress "draft". All geometry
@@ -19,6 +20,22 @@ Item {
     property var ann
     // The frozen ScreencopyView, sampled by the pixelate tool.
     property Item backdrop: null
+
+    readonly property rect bounds: {
+        const b = Geometry.bounds(ann, textMetrics.advanceWidth, fontMetrics.height);
+        return Qt.rect(b.x, b.y, b.width, b.height);
+    }
+    TextMetrics {
+        id: textMetrics
+        text: shape.ann?.type === "text" ? shape.ann.text : ""
+        font.family: Appearance.font.family.main
+        font.bold: true
+        font.pixelSize: shape.ann?.fontSize ?? 26
+    }
+    FontMetrics {
+        id: fontMetrics
+        font: textMetrics.font
+    }
 
     anchors.fill: parent
 

@@ -5,6 +5,7 @@ import qs.modules.common.functions
 import qs.modules.common.widgets
 import qs.services
 import QtQuick
+import "AnnotationGeometry.js" as AnnotationGeometry
 import QtQuick.Controls
 import Qt.labs.synchronizer
 import Quickshell
@@ -286,6 +287,7 @@ PanelWindow {
         // Edit: annotate in-shell instead of shelling out to satty/swappy.
         if (root.action === RegionSelection.SnipAction.Edit) {
             AnnotationState.reset();
+            root.selectionMode = RegionSelection.SelectionMode.RectCorners;
             root.phase = RegionSelection.Phase.Annotate;
             root.annotateStarted();
             keyHandler.forceActiveFocus();
@@ -597,7 +599,7 @@ PanelWindow {
         MouseArea {
             id: drawArea
             z: 5
-            enabled: root.phase === RegionSelection.Phase.Annotate && AnnotationState.isDrawTool()
+            enabled: root.phase === RegionSelection.Phase.Annotate
             visible: enabled
             x: root.regionX
             y: root.regionY
@@ -605,12 +607,73 @@ PanelWindow {
             height: root.regionHeight
             acceptedButtons: Qt.LeftButton
             preventStealing: true
-            cursorShape: Qt.CrossCursor
-            onPressed: (mouse) => canvas.beginDraft(root.regionX + mouse.x, root.regionY + mouse.y)
-            onPositionChanged: (mouse) => canvas.updateDraft(
-                Math.max(root.regionX, Math.min(root.regionX + mouse.x, root.regionX + root.regionWidth)),
-                Math.max(root.regionY, Math.min(root.regionY + mouse.y, root.regionY + root.regionHeight)))
-            onReleased: (mouse) => canvas.endDraft()
+            property bool selectGesture: false
+            property point pressPoint
+            property rect pressRegion
+            cursorShape: AnnotationState.tool === "select" ? (pressed ? Qt.ClosedHandCursor : Qt.OpenHandCursor) : Qt.CrossCursor
+            onPressed: mouse => {
+                pressPoint = mapToItem(mouseArea, mouse.x, mouse.y);
+                pressRegion = Qt.rect(root.regionX, root.regionY, root.regionWidth, root.regionHeight);
+                selectGesture = AnnotationState.tool === "select";
+                if (selectGesture) {
+                    canvas.selectAt(pressPoint.x, pressPoint.y);
+                    if (canvas.selectedIndex >= 0) canvas.beginResize();
+                } else canvas.beginDraft(pressPoint.x, pressPoint.y);
+            }
+            onPositionChanged: mouse => {
+                if (!pressed) return;
+                const point = mapToItem(mouseArea, mouse.x, mouse.y);
+                if (selectGesture) {
+                    const dx = point.x - pressPoint.x, dy = point.y - pressPoint.y;
+                    const limit = Qt.rect(0, 0, root.width, root.height);
+                    if (canvas.selectedIndex >= 0) canvas.moveSelected(dx, dy, limit);
+                    else {
+                        const moved = AnnotationGeometry.move(pressRegion, dx, dy, limit);
+                        root.regionX = moved.x;
+                        root.regionY = moved.y;
+                    }
+                } else canvas.updateDraft(
+                    Math.max(root.regionX, Math.min(point.x, root.regionX + root.regionWidth)),
+                    Math.max(root.regionY, Math.min(point.y, root.regionY + root.regionHeight)));
+            }
+            onReleased: {
+                if (selectGesture) canvas.finishResize();
+                else canvas.endDraft();
+            }
+            onCanceled: {
+                if (selectGesture) canvas.finishResize();
+                else canvas.endDraft();
+            }
+        }
+
+        ResizeHandles {
+            z: 7
+            anchors.fill: parent
+            visible: root.phase === RegionSelection.Phase.Annotate
+            targetRect: Qt.rect(root.regionX, root.regionY, root.regionWidth, root.regionHeight)
+            limitRect: Qt.rect(0, 0, root.width, root.height)
+            onResizeStarted: {
+                canvas.commitDraft();
+                canvas.selectedIndex = -1;
+            }
+            onResized: bounds => {
+                root.regionX = bounds.x;
+                root.regionY = bounds.y;
+                root.regionWidth = bounds.width;
+                root.regionHeight = bounds.height;
+            }
+        }
+        ResizeHandles {
+            z: 8
+            anchors.fill: parent
+            visible: root.phase === RegionSelection.Phase.Annotate && canvas.selectedIndex >= 0
+                && ["rect", "ellipse", "text"].includes(canvas.annotations[canvas.selectedIndex]?.type)
+            targetRect: canvas.selectedBounds
+            limitRect: Qt.rect(0, 0, root.width, root.height)
+            cornersOnly: canvas.annotations[canvas.selectedIndex]?.type === "text"
+            onResizeStarted: canvas.beginResize()
+            onResized: bounds => canvas.resizeSelected(bounds)
+            onResizeFinished: canvas.finishResize()
         }
 
         // Inline text editor. Lives outside the captured subtree, so the live
@@ -643,14 +706,8 @@ PanelWindow {
             id: annotationToolbar
             z: 10000
             visible: root.phase === RegionSelection.Phase.Annotate
-            x: Math.max(8, Math.min(root.regionX, root.width - width - 8))
-            y: {
-                const below = root.regionY + root.regionHeight + 8;
-                const above = root.regionY - height - 8;
-                if (below + height <= root.height) return below;
-                if (above >= 0) return above;
-                return Math.max(8, Math.min(root.regionY + 8, root.height - height - 8));
-            }
+            anchors.fill: parent
+            selection: Qt.rect(root.regionX, root.regionY, root.regionWidth, root.regionHeight)
             onUndo: canvas.undo()
             onClearAll: canvas.clearAll()
             onCopy: root.exportEdit("copy")
@@ -697,6 +754,7 @@ PanelWindow {
             return;
         }
         const map = {};
+        map[Qt.Key_V] = "select";
         map[Qt.Key_R] = "rect";
         map[Qt.Key_O] = "ellipse";
         map[Qt.Key_A] = "arrow";

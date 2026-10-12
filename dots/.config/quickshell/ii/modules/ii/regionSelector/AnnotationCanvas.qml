@@ -1,4 +1,6 @@
 import QtQuick
+import qs.modules.common
+import "AnnotationGeometry.js" as Geometry
 
 // Owns the annotation model and the in-progress draft, and renders both on top
 // of the frozen screenshot. Drawing gestures are fed in from the overlay's
@@ -19,6 +21,66 @@ Item {
     property var editing: null
 
     property var _penPoints: null
+    property int selectedIndex: -1
+    readonly property rect selectedBounds: {
+        const b = Geometry.bounds(annotations[selectedIndex], selectedText.advanceWidth, selectedFont.height);
+        return Qt.rect(b.x, b.y, b.width, b.height);
+    }
+    TextMetrics {
+        id: selectedText
+        text: canvas.annotations[canvas.selectedIndex]?.text ?? ""
+        font.family: Appearance.font.family.main
+        font.bold: true
+        font.pixelSize: canvas.annotations[canvas.selectedIndex]?.fontSize ?? 26
+    }
+    FontMetrics { id: selectedFont; font: selectedText.font }
+    property var history: []
+    property var resizeOriginal: null
+    property rect resizeBounds
+
+    function selectAt(x, y) {
+        finishEditing();
+        selectedIndex = -1;
+        for (let i = annotations.length - 1; i >= 0; --i) {
+            const b = committedShapes.itemAt(i).bounds;
+            if (b.width > 0 && b.height > 0 && x >= b.x - 4 && x <= b.x + b.width + 4
+                && y >= b.y - 4 && y <= b.y + b.height + 4) {
+                selectedIndex = i;
+                break;
+            }
+        }
+    }
+
+    function beginResize() {
+        resizeOriginal = annotations;
+        resizeBounds = selectedBounds;
+    }
+
+    function resizeSelected(bounds) {
+        if (!resizeOriginal || selectedIndex < 0) return;
+        const updated = annotations.slice();
+        updated[selectedIndex] = Geometry.resizeAnnotation(resizeOriginal[selectedIndex], resizeBounds, bounds);
+        annotations = updated;
+    }
+
+    function moveSelected(dx, dy, limit) {
+        if (!resizeOriginal || selectedIndex < 0) return;
+        const moved = Geometry.move(resizeBounds, dx, dy, limit);
+        if (moved.x === resizeBounds.x && moved.y === resizeBounds.y) {
+            annotations = resizeOriginal;
+            return;
+        }
+        const updated = annotations.slice();
+        updated[selectedIndex] = Geometry.moveAnnotation(resizeOriginal[selectedIndex],
+            moved.x - resizeBounds.x, moved.y - resizeBounds.y);
+        annotations = updated;
+    }
+
+    function finishResize() {
+        if (resizeOriginal && annotations !== resizeOriginal)
+            history = history.concat([resizeOriginal]);
+        resizeOriginal = null;
+    }
 
     // The inline text editor lives in the overlay (above the drawing MouseArea)
     // rather than here, so it can be clicked into. These signals drive it.
@@ -27,6 +89,7 @@ Item {
 
     // ---- Committed annotations ----------------------------------------------
     Repeater {
+        id: committedShapes
         model: canvas.annotations
         delegate: AnnotationShape {
             required property var modelData
@@ -44,6 +107,7 @@ Item {
 
     // ---- Gesture API ---------------------------------------------------------
     function beginDraft(gx, gy) {
+        selectedIndex = -1;
         // Always commit a pending text edit before starting a new gesture.
         if (canvas.editing)
             finishEditing();
@@ -110,6 +174,7 @@ Item {
     }
 
     function pushAnnotation(a) {
+        history = history.concat([annotations]);
         canvas.annotations = canvas.annotations.concat([a]);
     }
 
@@ -144,18 +209,26 @@ Item {
             cancelEditing();
             return;
         }
-        if (canvas.annotations.length > 0)
-            canvas.annotations = canvas.annotations.slice(0, canvas.annotations.length - 1);
+        finishResize();
+        selectedIndex = -1;
+        if (history.length > 0) {
+            annotations = history[history.length - 1];
+            history = history.slice(0, -1);
+        }
     }
 
     function clearAll() {
         cancelEditing();
         canvas.annotations = [];
+        history = [];
+        selectedIndex = -1;
+        resizeOriginal = null;
         AnnotationState.counterValue = 1;
     }
 
     // Ensure no editor/draft is left dangling before a grab.
     function commitDraft() {
+        finishResize();
         if (canvas.editing)
             finishEditing();
         if (canvas.draft)
