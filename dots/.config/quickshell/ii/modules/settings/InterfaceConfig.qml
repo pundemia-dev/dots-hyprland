@@ -730,6 +730,14 @@ ContentPage {
         }
         ConfigSwitch {
             buttonIcon: "center_focus_strong"
+            text: Translation.tr("Center overview")
+            checked: Config.options.overview.center
+            onCheckedChanged: {
+                Config.options.overview.center = checked;
+            }
+        }
+        ConfigSwitch {
+            buttonIcon: "center_focus_strong"
             text: Translation.tr("Center icons")
             checked: Config.options.overview.centerIcons
             onCheckedChanged: {
