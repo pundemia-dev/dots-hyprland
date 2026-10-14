@@ -2,6 +2,7 @@ pragma Singleton
 pragma ComponentBehavior: Bound
 
 import qs.modules.common
+import qs.modules.common.functions
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -21,12 +22,21 @@ Singleton {
 
     function applyColors(fileContent) {
         const json = JSON.parse(fileContent)
+        const accent = Qt.color(json.primary ?? Appearance.m3colors.m3primary);
+        const backgroundRoles = [
+            "background", "surface", "surface_dim", "surface_bright", "surface_variant",
+            "surface_container_lowest", "surface_container_low", "surface_container",
+            "surface_container_high", "surface_container_highest", "inverse_surface"
+        ];
         for (const key in json) {
             if (json.hasOwnProperty(key)) {
                 // Convert snake_case to CamelCase
                 const camelCaseKey = key.replace(/_([a-z])/g, (g) => g[1].toUpperCase())
                 const m3Key = `m3${camelCaseKey}`
-                Appearance.m3colors[m3Key] = json[key]
+                const color = Qt.color(json[key]);
+                Appearance.m3colors[m3Key] = backgroundRoles.includes(key)
+                    ? ColorUtils.mix(Qt.hsla(0, 0, color.hslLightness, color.a), ColorUtils.adaptToAccent(color, accent), 0.75)
+                    : color;
             }
         }
         
